@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<plugin xmlns="http://apache.org/cordova/ns/plugins/1.0"
+        id="cordova-plugin-zkteco-fingerprint"
+        version="1.0.0">
+
+    <name>ZKTeco Fingerprint</name>
+    <description>Cordova plugin for ZKTeco USB fingerprint reader (VID:6997 PID:292) using SILK ID SDK</description>
+    <license>MIT</license>
+    <keywords>fingerprint, zkteco, biometric, usb</keywords>
+
+    <js-module src="www/ZKTecoFingerprint.js" name="ZKTecoFingerprint">
+        <clobbers target="ZKTecoFingerprint" />
+    </js-module>
+
+    <platform name="android">
+        <!-- Plugin Java class -->
+        <source-file src="src/android/ZKTecoFingerprintPlugin.java"
+                     target-dir="src/com/zkteco/cordova" />
+
+        <!-- ZKTeco SDK JARs -->
+        <source-file src="src/android/libs/zkandroidfpreader.jar" target-dir="libs" />
+        <source-file src="src/android/libs/zkandroidcore.jar"     target-dir="libs" />
+        <source-file src="src/android/libs/musicg-1.4.2.0.jar"   target-dir="libs" />
+
+        <!-- Native .so libraries (armeabi-v7a) -->
+        <source-file src="src/android/libs/armeabi-v7a/libzksilkid.so"
+                     target-dir="libs/armeabi-v7a" />
+        <source-file src="src/android/libs/armeabi-v7a/libzkfinger10.so"
+                     target-dir="libs/armeabi-v7a" />
+
+        <!-- Native .so libraries (arm64-v8a) -->
+        <source-file src="src/android/libs/arm64-v8a/libzksilkid.so"
+                     target-dir="libs/arm64-v8a" />
+        <source-file src="src/android/libs/arm64-v8a/libzkfinger10.so"
+                     target-dir="libs/arm64-v8a" />
+
+        <!-- USB device filter resource -->
+        <source-file src="src/android/res/xml/zkteco_device_filter.xml"
+                     target-dir="res/xml" />
+
+        <!-- Gradle file: makes libs/ a jniLibs source dir and adds JAR dependency -->
+        <framework src="src/android/zkteco-fingerprint.gradle"
+                   custom="true" type="gradleReference" />
+
+        <!-- AndroidManifest.xml additions -->
+        <config-file target="AndroidManifest.xml" parent="/manifest">
+            <uses-permission android:name="android.permission.INTERNET" />
+            <uses-feature android:name="android.hardware.usb.host" android:required="true" />
+        </config-file>
+
+        <config-file target="AndroidManifest.xml" parent="/manifest/application/activity">
+            <intent-filter>
+                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
+            </intent-filter>
+            <meta-data
+                android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
+                android:resource="@xml/zkteco_device_filter" />
+        </config-file>
+
+        <!-- Register plugin with Cordova -->
+        <config-file target="res/xml/config.xml" parent="/*">
+            <feature name="ZKTecoFingerprint">
+                <param name="android-package" value="com.zkteco.cordova.ZKTecoFingerprintPlugin" />
+            </feature>
+        </config-file>
+    </platform>
+</plugin>

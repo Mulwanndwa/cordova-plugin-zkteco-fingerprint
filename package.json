@@ -1,0 +1,29 @@
+{
+  "name": "cordova-plugin-zkteco-fingerprint",
+  "version": "1.0.0",
+  "description": "Cordova plugin for ZKTeco USB fingerprint reader using the SILK ID SDK",
+  "main": "www/ZKTecoFingerprint.js",
+  "keywords": [
+    "cordova",
+    "fingerprint",
+    "zkteco",
+    "biometric",
+    "usb",
+    "silkid",
+    "ecosystem:cordova",
+    "cordova-android"
+  ],
+  "engines": {
+    "cordovaDependencies": {
+      "1.0.0": {
+        "cordova-android": ">=10.0.0"
+      }
+    }
+  },
+  "author": "ordev.io",
+  "license": "MIT",
+  "cordova": {
+    "id": "cordova-plugin-zkteco-fingerprint",
+    "platforms": ["android"]
+  }
+}

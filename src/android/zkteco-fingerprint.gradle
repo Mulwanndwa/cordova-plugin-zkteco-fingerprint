@@ -1,0 +1,13 @@
+// Tells the Android build system to treat the libs/ directory as both a
+// JAR dependency source and a JNI native-library source (for the .so files).
+android {
+    sourceSets {
+        main {
+            jniLibs.srcDirs += ['libs']
+        }
+    }
+}
+
+dependencies {
+    implementation fileTree(include: ['*.jar'], dir: 'libs')
+}

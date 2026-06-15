@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- ZKTeco USB fingerprint reader: VID 6997 (0x1B55), PID 292 (0x0124) -->
+    <usb-device vendor-id="6997" product-id="292" />
+</resources>
