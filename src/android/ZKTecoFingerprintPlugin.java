@@ -5,10 +5,14 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.graphics.Bitmap;
+import android.graphics.Color;
 import android.hardware.usb.UsbDevice;
 import android.hardware.usb.UsbManager;
 import android.util.Base64;
 import android.util.Log;
+
+import java.io.ByteArrayOutputStream;
 
 import com.zkteco.android.biometric.core.device.ParameterHelper;
 import com.zkteco.android.biometric.core.device.TransportType;
@@ -58,18 +62,37 @@ public class ZKTecoFingerprintPlugin extends CordovaPlugin {
     // Active callback kept alive for streaming results
     private CallbackContext activeCallback = null;
 
+    // init() waiting on the USB permission dialog result (null once resolved)
+    private CallbackContext pendingInitCallback = null;
+
     private boolean usbReceiverRegistered = false;
 
     private final BroadcastReceiver usbReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
-            if (ACTION_USB_PERMISSION.equals(intent.getAction())) {
-                if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
-                    Log.i(TAG, "USB permission granted");
-                } else {
-                    Log.w(TAG, "USB permission denied by user");
+            if (!ACTION_USB_PERMISSION.equals(intent.getAction())) return;
+
+            boolean granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false);
+            Log.i(TAG, granted ? "USB permission granted" : "USB permission denied by user");
+
+            final CallbackContext waiting = pendingInitCallback;
+            pendingInitCallback = null;
+            if (waiting == null) return;
+
+            cordova.getThreadPool().execute(() -> {
+                if (!granted) {
+                    waiting.error("USB permission denied for the fingerprint reader");
+                    return;
                 }
-            }
+                try {
+                    openSensor();
+                    waiting.success("Fingerprint sensor initialized");
+                } catch (FingerprintException e) {
+                    waiting.error("Init failed: " + e.getMessage() + " (code " + e.getErrorCode() + ")");
+                } catch (Exception e) {
+                    waiting.error("Init failed: " + e.getMessage());
+                }
+            });
         }
     };
 
@@ -115,10 +138,39 @@ public class ZKTecoFingerprintPlugin extends CordovaPlugin {
     // -------------------------------------------------------------------------
 
     private void init(final CallbackContext callbackContext) {
+        // Idempotent: openSensor() creates a brand-new native FingerprintSensor
+        // every time it runs, with no matching close() of whatever was open
+        // before. A caller that re-inits on every scan attempt (e.g. after a
+        // prior error) would otherwise leak the old sensor handle while
+        // captureRunning/activeCallback state from that leaked session bleeds
+        // into the new one — the classic symptom being a "Get Image failed"
+        // captureError on the retry because the sensor object actually
+        // receiving events is no longer the one startCapture() was called on.
+        if (sensorOpen) {
+            callbackContext.success("Fingerprint sensor already initialized");
+            return;
+        }
         cordova.getThreadPool().execute(() -> {
             try {
                 registerUsbReceiver();
-                requestUsbPermission();
+
+                UsbManager usbManager = (UsbManager)
+                        cordova.getActivity().getSystemService(Context.USB_SERVICE);
+                UsbDevice device = findDevice(usbManager);
+                if (usbManager == null || device == null) {
+                    callbackContext.error("No ZKTeco fingerprint reader detected (VID " + VID + " / PID " + PID + ")");
+                    return;
+                }
+
+                if (!usbManager.hasPermission(device)) {
+                    // Hold the callback open until the permission dialog result comes back
+                    // through usbReceiver — opening the sensor before that would race the
+                    // native SDK against a permission it doesn't have yet.
+                    pendingInitCallback = callbackContext;
+                    requestUsbPermission(usbManager, device);
+                    return;
+                }
+
                 openSensor();
                 callbackContext.success("Fingerprint sensor initialized");
             } catch (FingerprintException e) {
@@ -209,15 +261,7 @@ public class ZKTecoFingerprintPlugin extends CordovaPlugin {
     private void isConnected(final CallbackContext callbackContext) {
         UsbManager usbManager = (UsbManager)
                 cordova.getActivity().getSystemService(Context.USB_SERVICE);
-        if (usbManager != null) {
-            for (UsbDevice device : usbManager.getDeviceList().values()) {
-                if (device.getVendorId() == VID && device.getProductId() == PID) {
-                    callbackContext.success(1);
-                    return;
-                }
-            }
-        }
-        callbackContext.success(0);
+        callbackContext.success(findDevice(usbManager) != null ? 1 : 0);
     }
 
     // -------------------------------------------------------------------------
@@ -267,16 +311,32 @@ public class ZKTecoFingerprintPlugin extends CordovaPlugin {
 
         @Override
         public void captureOK(byte[] fpImage) {
-            // Raw image available — we wait for extractOK for the template
+            // Raw image available as soon as a finger touches the sensor — pushed to
+            // JS immediately (ahead of extractOK's template match) so the UI can show
+            // a live preview while the user's finger is still on the reader.
+            if (activeCallback == null || fingerprintSensor == null) return;
+            try {
+                int width = fingerprintSensor.getImageWidth();
+                int height = fingerprintSensor.getImageHeight();
+                String base64 = imageToBase64(fpImage, width, height);
+                if (base64 == null) return;
+
+                JSONObject payload = new JSONObject();
+                payload.put("image", "data:image/png;base64," + base64);
+                payload.put("width", width);
+                payload.put("height", height);
+                sendKeepAlive(payload);
+            } catch (Exception e) {
+                Log.e(TAG, "captureOK image encode failed: " + e.getMessage());
+            }
         }
 
         @Override
         public void captureError(FingerprintException e) {
-            Log.e(TAG, "captureError: " + e.getMessage());
-            if (activeCallback != null) {
-                activeCallback.error("Capture error: " + e.getMessage());
-                activeCallback = null;
-            }
+            // The SDK raises this for transient misses too (e.g. "Get Image failed" when no
+            // finger is on the sensor or the press was partial). Capture keeps polling, so
+            // don't tear down the callback — the next extractOK will complete it.
+            Log.w(TAG, "captureError (non-fatal): " + e.getMessage());
         }
 
         @Override
@@ -314,7 +374,7 @@ public class ZKTecoFingerprintPlugin extends CordovaPlugin {
             JSONObject result = new JSONObject();
             if (ret > 0) {
                 String[] parts = new String(bufids).split("\t");
-                String userId = parts[0].trim().substring(4); // strip "test" prefix
+                String userId = parseUserIdFromMatch(parts[0]);
                 int score = 0;
                 if (parts.length > 1) {
                     try { score = Integer.parseInt(parts[1].trim()); } catch (NumberFormatException ignored) {}
@@ -341,7 +401,7 @@ public class ZKTecoFingerprintPlugin extends CordovaPlugin {
         int dupCheck = ZKFingerService.identify(fpTemplate, bufids, 55, 1);
         if (dupCheck > 0) {
             String[] parts = new String(bufids).split("\t");
-            String existingUserId = parts[0].trim().substring(4);
+            String existingUserId = parseUserIdFromMatch(parts[0]);
             try {
                 JSONObject err = new JSONObject();
                 err.put("error", "ALREADY_ENROLLED");
@@ -436,9 +496,40 @@ public class ZKTecoFingerprintPlugin extends CordovaPlugin {
         return obj;
     }
 
+    /**
+     * Converts the sensor's raw 8-bit grayscale frame (one byte per pixel) into a
+     * base64-encoded PNG suitable for an <img> src on the JS side.
+     */
+    private String imageToBase64(byte[] grayscale, int width, int height) {
+        if (grayscale == null || width <= 0 || height <= 0 || grayscale.length < width * height) {
+            return null;
+        }
+        int[] pixels = new int[width * height];
+        for (int i = 0; i < pixels.length; i++) {
+            int gray = grayscale[i] & 0xFF;
+            pixels[i] = Color.argb(255, gray, gray, gray);
+        }
+        Bitmap bitmap = Bitmap.createBitmap(pixels, width, height, Bitmap.Config.ARGB_8888);
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        bitmap.compress(Bitmap.CompressFormat.PNG, 100, baos);
+        bitmap.recycle();
+        return Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP);
+    }
+
     /** Templates are stored in ZKFingerService with a "test" prefix, matching the original app. */
     private String templateKey(String userId) {
         return "test" + userId;
+    }
+
+    /**
+     * Mirrors the reference app's parseUserIdFromMatch: strips the "test" storage prefix,
+     * then strips any "_<suffix>" (e.g. a per-finger template index) a caller may have
+     * appended to the id passed into loadTemplates()/startEnroll().
+     */
+    private String parseUserIdFromMatch(String rawMatchField) {
+        String rawId = rawMatchField.trim().substring(4);
+        int suffixAt = rawId.indexOf('_');
+        return suffixAt >= 0 ? rawId.substring(0, suffixAt) : rawId;
     }
 
     private void registerUsbReceiver() {
@@ -450,25 +541,24 @@ public class ZKTecoFingerprintPlugin extends CordovaPlugin {
         }
     }
 
-    private void requestUsbPermission() {
-        Context context = cordova.getActivity().getApplicationContext();
-        UsbManager usbManager = (UsbManager)
-                cordova.getActivity().getSystemService(Context.USB_SERVICE);
-        if (usbManager == null) return;
-
+    /** First attached USB device matching the ZKTeco reader's VID/PID, or null if none. */
+    private UsbDevice findDevice(UsbManager usbManager) {
+        if (usbManager == null) return null;
         for (UsbDevice device : usbManager.getDeviceList().values()) {
             if (device.getVendorId() == VID && device.getProductId() == PID) {
-                if (!usbManager.hasPermission(device)) {
-                    Intent intent = new Intent(ACTION_USB_PERMISSION);
-                    PendingIntent pendingIntent = PendingIntent.getBroadcast(
-                            context, 0, intent, PendingIntent.FLAG_IMMUTABLE);
-                    usbManager.requestPermission(device, pendingIntent);
-                    Log.i(TAG, "USB permission requested");
-                } else {
-                    Log.i(TAG, "USB permission already granted");
-                }
+                return device;
             }
         }
+        return null;
+    }
+
+    private void requestUsbPermission(UsbManager usbManager, UsbDevice device) {
+        Context context = cordova.getActivity().getApplicationContext();
+        Intent intent = new Intent(ACTION_USB_PERMISSION);
+        PendingIntent pendingIntent = PendingIntent.getBroadcast(
+                context, 0, intent, PendingIntent.FLAG_IMMUTABLE);
+        usbManager.requestPermission(device, pendingIntent);
+        Log.i(TAG, "USB permission requested");
     }
 
     // -------------------------------------------------------------------------

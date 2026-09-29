@@ -20,8 +20,9 @@ var ZKTecoFingerprint = {
      * The user must press the same finger 3 times.
      *
      * The success callback fires multiple times:
-     *   - Progress update: { progress: true, step: 1|2|3, total: 3, message: "..." }
-     *   - Completion:      { enrolled: true, userId: "...", template: "<base64>" }
+     *   - Finger touch:     { image: "data:image/png;base64,...", width: <int>, height: <int> }
+     *   - Progress update:  { progress: true, step: 1|2|3, total: 3, message: "..." }
+     *   - Completion:       { enrolled: true, userId: "...", template: "<base64>" }
      *
      * The returned base64 template should be stored on your server and loaded
      * back via loadTemplates() for future identification.
@@ -36,7 +37,9 @@ var ZKTecoFingerprint = {
 
     /**
      * Start continuous identification mode.
-     * The success callback fires every time a finger is placed:
+     * The success callback fires:
+     *   - As soon as a finger touches the sensor (ahead of the match result):
+     *               { image: "data:image/png;base64,...", width: <int>, height: <int> }
      *   - Match:    { identified: true,  userId: "...", score: <int> }
      *   - No match: { identified: false }
      *
